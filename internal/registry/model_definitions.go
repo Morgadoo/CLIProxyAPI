@@ -21,6 +21,7 @@ type staticModelsJSON struct {
 	IFlow       []*ModelInfo `json:"iflow"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
+	RedPill     []*ModelInfo `json:"redpill"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -83,6 +84,40 @@ func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
 }
 
+// GetRedPillModels returns the standard RedPill model definitions.
+func GetRedPillModels() []*ModelInfo {
+	models := getModels().RedPill
+	if len(models) > 0 {
+		return cloneModelInfos(models)
+	}
+	// Fallback: return hardcoded models if not in models.json
+	return getRedPillDefaultModels()
+}
+
+// getRedPillDefaultModels returns hardcoded RedPill model definitions.
+func getRedPillDefaultModels() []*ModelInfo {
+	return []*ModelInfo{
+		{ID: "deepseek/deepseek-r1-0528", DisplayName: "DeepSeek R1 0528", ContextLength: 163840},
+		{ID: "deepseek/deepseek-v3.2", DisplayName: "DeepSeek V3.2", ContextLength: 163840},
+		{ID: "deepseek/deepseek-chat-v3.1", DisplayName: "DeepSeek V3.1", ContextLength: 163840},
+		{ID: "qwen/qwen3-coder-480b-a35b-instruct", DisplayName: "Qwen3 Coder 480B", ContextLength: 262000},
+		{ID: "qwen/qwen3.5-397b-a17b", DisplayName: "Qwen3.5 397B A17B", ContextLength: 262144},
+		{ID: "qwen/qwen3.5-27b", DisplayName: "Qwen3.5 27B", ContextLength: 262144},
+		{ID: "qwen/qwen3-30b-a3b-instruct-2507", DisplayName: "Qwen3 30B A3B", ContextLength: 262144},
+		{ID: "qwen/qwen-2.5-7b-instruct", DisplayName: "Qwen2.5 7B", ContextLength: 32768},
+		{ID: "qwen/qwen3-vl-30b-a3b-instruct", DisplayName: "Qwen3 VL 30B", ContextLength: 128000},
+		{ID: "openai/gpt-oss-120b", DisplayName: "GPT OSS 120B", ContextLength: 131072},
+		{ID: "google/gemma-3-27b-it", DisplayName: "Gemma 3 27B", ContextLength: 53920},
+		{ID: "meta-llama/llama-3.3-70b-instruct", DisplayName: "Llama 3.3 70B", ContextLength: 131072},
+		{ID: "moonshotai/kimi-k2-thinking", DisplayName: "Kimi K2 Thinking", ContextLength: 262144},
+		{ID: "moonshotai/kimi-k2.5", DisplayName: "Kimi K2.5", ContextLength: 262144},
+		{ID: "z-ai/glm-5", DisplayName: "GLM 5", ContextLength: 202752},
+		{ID: "z-ai/glm-4.7", DisplayName: "GLM 4.7", ContextLength: 131072},
+		{ID: "z-ai/glm-4.7-flash", DisplayName: "GLM 4.7 Flash", ContextLength: 202752},
+		{ID: "phala/uncensored-24b", DisplayName: "Venice Uncensored 24B", ContextLength: 32768},
+	}
+}
+
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
@@ -137,6 +172,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "redpill":
+		return GetRedPillModels()
 	default:
 		return nil
 	}

@@ -29,6 +29,7 @@ import (
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	redpillauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/redpill"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -2340,6 +2341,95 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	}
 
 	fmt.Printf("iFlow cookie authentication successful. Token saved to %s\n", savedPath)
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "ok",
+		"saved_path": savedPath,
+		"email":      email,
+		"expired":    tokenStorage.Expire,
+		"type":       tokenStorage.Type,
+	})
+}
+
+func (h *Handler) RequestRedPillCookieToken(c *gin.Context) {
+	ctx := context.Background()
+
+	var payload struct {
+		Cookie string `json:"cookie"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "cookie is required"})
+		return
+	}
+
+	cookieValue := strings.TrimSpace(payload.Cookie)
+
+	if cookieValue == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "cookie is required"})
+		return
+	}
+
+	cookieValue, errNormalize := redpillauth.NormalizeCookie(cookieValue)
+	if errNormalize != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": errNormalize.Error()})
+		return
+	}
+
+	// Check for duplicate token before authentication
+	token := redpillauth.ExtractToken(cookieValue)
+	if existingFile, err := redpillauth.CheckDuplicateToken(h.cfg.AuthDir, token); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to check duplicate"})
+		return
+	} else if existingFile != "" {
+		existingFileName := filepath.Base(existingFile)
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "duplicate token found", "existing_file": existingFileName})
+		return
+	}
+
+	authSvc := redpillauth.NewRedPillAuth(h.cfg)
+	tokenData, errAuth := authSvc.AuthenticateWithCookie(ctx, cookieValue)
+	if errAuth != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": errAuth.Error()})
+		return
+	}
+
+	tokenStorage := authSvc.CreateCookieTokenStorage(tokenData)
+	email := strings.TrimSpace(tokenStorage.Email)
+	if email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "failed to extract email from token"})
+		return
+	}
+
+	fileName := redpillauth.SanitizeRedPillFileName(email)
+	if fileName == "" {
+		fileName = fmt.Sprintf("redpill-%d", time.Now().UnixMilli())
+	} else {
+		fileName = fmt.Sprintf("redpill-%s", fileName)
+	}
+
+	tokenStorage.Email = email
+	timestamp := time.Now().Unix()
+
+	record := &coreauth.Auth{
+		ID:       fmt.Sprintf("%s-%d.json", fileName, timestamp),
+		Provider: "redpill",
+		FileName: fmt.Sprintf("%s-%d.json", fileName, timestamp),
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email":        email,
+			"expired":      tokenStorage.Expire,
+			"cookie":       tokenStorage.Cookie,
+			"type":         tokenStorage.Type,
+			"last_refresh": tokenStorage.LastRefresh,
+		},
+	}
+
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if errSave != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to save authentication tokens"})
+		return
+	}
+
+	fmt.Printf("RedPill cookie authentication successful. Token saved to %s\n", savedPath)
 	c.JSON(http.StatusOK, gin.H{
 		"status":     "ok",
 		"saved_path": savedPath,
