@@ -5,6 +5,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"errors"
@@ -630,6 +631,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/redpill-auth-url", s.mgmt.RequestRedPillCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		mgmt.POST("/test-models", s.mgmt.TestModels)
 	}
 }
 
@@ -670,8 +673,188 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.WithError(err).Error("failed to read management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	data = injectTestModelsScript(data)
+	c.Header("Cache-Control", "no-cache")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 }
+
+// injectTestModelsScript decorates the upstream management SPA with a
+// small click-to-test script, inserted just before </body>. The script
+// piggybacks on the SPA's own auth headers to call POST /v0/management/test-models
+// when an operator clicks a model pill in the Available Models section.
+func injectTestModelsScript(html []byte) []byte {
+	const marker = "</body>"
+	idx := bytes.LastIndex(html, []byte(marker))
+	if idx < 0 {
+		return html
+	}
+	script := []byte("<script>\n" + testModelsInjectedScript + "\n</script>\n")
+	out := make([]byte, 0, len(html)+len(script))
+	out = append(out, html[:idx]...)
+	out = append(out, script...)
+	out = append(out, html[idx:]...)
+	return out
+}
+
+// testModelsInjectedScript is the client-side behavior added to the
+// management panel: captures the management bearer token from the SPA's
+// outgoing requests, then attaches a click handler that tests whichever
+// model pill the operator clicks on inside the Available Models section.
+const testModelsInjectedScript = `(function(){
+  'use strict';
+  var DEBUG=true;
+  function log(){if(DEBUG)console.log.apply(console,['[cpa]'].concat([].slice.call(arguments)));}
+
+  var style=document.createElement('style');
+  style.textContent='[data-cpa-model]{cursor:pointer!important;transition:outline .15s}'+
+    '[data-cpa-model]:hover{outline:2px solid rgba(125,211,252,0.55)!important;outline-offset:2px!important}'+
+    '[data-cpa-model][data-cpa-state="testing"]{outline:2px solid #facc15!important;outline-offset:2px!important}'+
+    '[data-cpa-model][data-cpa-state="ok"]{outline:2px solid #4ade80!important;outline-offset:2px!important}'+
+    '[data-cpa-model][data-cpa-state="fail"]{outline:2px solid #f87171!important;outline-offset:2px!important}';
+  document.documentElement.appendChild(style);
+
+  var savedKey=null, proxyKey=null, modelSet=null, kickoffStarted=false;
+  var origFetch=window.fetch.bind(window);
+  var origSetHeader=XMLHttpRequest.prototype.setRequestHeader;
+  var origOpen=XMLHttpRequest.prototype.open;
+
+  function captureKey(k){if(k&&k!==savedKey){savedKey=k;log('mgmt key captured');kickoff();}}
+  XMLHttpRequest.prototype.open=function(m,u){this.__cpa_url=u;return origOpen.apply(this,arguments);};
+  XMLHttpRequest.prototype.setRequestHeader=function(n,v){
+    try{
+      if(n&&n.toLowerCase()==='authorization'&&typeof v==='string'&&v.indexOf('Bearer ')===0){
+        var u=this.__cpa_url||'';
+        if(u.indexOf('/v0/management/')>=0)captureKey(v.slice(7));
+      }
+    }catch(e){}
+    return origSetHeader.apply(this,arguments);
+  };
+  window.fetch=function(input,init){
+    try{
+      var u=typeof input==='string'?input:(input&&input.url)||'';
+      if(u.indexOf('/v0/management/')>=0){
+        var h=(init&&init.headers)||(input&&input.headers),auth=null;
+        if(h){
+          if(typeof h.get==='function')auth=h.get('Authorization')||h.get('authorization');
+          else auth=h.Authorization||h.authorization;
+        }
+        if(auth&&auth.indexOf('Bearer ')===0)captureKey(auth.slice(7));
+      }
+    }catch(e){}
+    return origFetch.apply(this,arguments);
+  };
+
+  function toast(msg,color){
+    var t=document.createElement('div');
+    t.textContent=msg;
+    t.style.cssText='position:fixed;bottom:20px;right:20px;background:'+color+';color:#fff;'+
+      'padding:10px 14px;border-radius:8px;font:13px/1.4 ui-monospace,monospace;'+
+      'max-width:480px;white-space:pre-wrap;box-shadow:0 4px 12px rgba(0,0,0,0.4);z-index:99999;'+
+      'opacity:0;transition:opacity .2s;';
+    document.body.appendChild(t);
+    requestAnimationFrame(function(){t.style.opacity='1';});
+    setTimeout(function(){t.style.opacity='0';setTimeout(function(){t.remove();},300);},7000);
+  }
+
+  async function ensureModelSet(){
+    if(modelSet)return modelSet;
+    if(!savedKey){log('no mgmt key yet');return null;}
+    try{
+      if(!proxyKey){
+        var r=await origFetch('/v0/management/api-keys',{headers:{'Authorization':'Bearer '+savedKey}});
+        if(!r.ok){log('api-keys fetch failed',r.status);return null;}
+        var j=await r.json();
+        var arr=Array.isArray(j)?j:(j['api-keys']||j.api_keys||j.apiKeys||j.data||j.keys||j.items||[]);
+        for(var i=0;i<arr.length&&!proxyKey;i++){
+          var it=arr[i];
+          var v=typeof it==='string'?it:(it&&(it.key||it.api_key||it.apiKey||it.value));
+          if(v&&typeof v==='string'&&v.trim())proxyKey=v.trim();
+        }
+      }
+      if(!proxyKey){log('no proxy api-key found');return null;}
+      var m=await origFetch('/v1/models',{headers:{'Authorization':'Bearer '+proxyKey}});
+      if(!m.ok){log('/v1/models fetch failed',m.status);return null;}
+      var mj=await m.json();
+      modelSet=new Set(((mj.data||[])).map(function(x){return x.id;}));
+      log('model set loaded:',modelSet.size);
+      return modelSet;
+    }catch(e){log('ensureModelSet error',e);return null;}
+  }
+
+  function markPills(){
+    if(!modelSet)return 0;
+    var all=document.querySelectorAll('span,div,button,a,code,li,p');
+    var marked=0;
+    for(var i=0;i<all.length;i++){
+      var el=all[i];
+      if(el.hasAttribute('data-cpa-model'))continue;
+      if(el.children.length>2)continue;
+      var txt=(el.textContent||'').trim();
+      if(!txt||txt.length>120)continue;
+      if(!modelSet.has(txt))continue;
+      if(el.parentElement&&el.parentElement.closest&&el.parentElement.closest('[data-cpa-model]'))continue;
+      el.setAttribute('data-cpa-model',txt);
+      el.setAttribute('title','Click to test — '+txt);
+      marked++;
+    }
+    return marked;
+  }
+
+  async function kickoff(){
+    if(kickoffStarted)return;
+    kickoffStarted=true;
+    var set=await ensureModelSet();
+    if(!set){kickoffStarted=false;return;}
+    log('initial pills marked:',markPills());
+    var obs=new MutationObserver(function(){markPills();});
+    obs.observe(document.body,{childList:true,subtree:true});
+  }
+
+  async function runTest(el,modelId){
+    el.setAttribute('data-cpa-state','testing');
+    try{
+      var r=await origFetch('/v0/management/test-models',{
+        method:'POST',
+        headers:{'Authorization':'Bearer '+savedKey,'Content-Type':'application/json'},
+        body:JSON.stringify({models:[modelId],max_tokens:20,timeout_seconds:25})
+      });
+      var txt=await r.text();
+      if(!r.ok){el.setAttribute('data-cpa-state','fail');toast('HTTP '+r.status+' — '+txt.slice(0,300),'#b91c1c');return;}
+      var data=JSON.parse(txt),res=(data.results||[])[0]||{};
+      if(res.success){
+        el.setAttribute('data-cpa-state','ok');
+        toast('✓ '+modelId+'\n'+res.latency_ms+'ms · '+res.prompt_tokens+'→'+res.completion_tokens+' tok\nreply: '+(res.reply||'(empty)'),'#166534');
+      }else{
+        el.setAttribute('data-cpa-state','fail');
+        toast('✗ '+modelId+'\nHTTP '+(res.status_code||'-')+' · '+res.latency_ms+'ms\n'+(res.error||'(no error body)'),'#b91c1c');
+      }
+    }catch(e){
+      el.setAttribute('data-cpa-state','fail');
+      toast('Error: '+e.message,'#b91c1c');
+    }finally{
+      setTimeout(function(){el.removeAttribute('data-cpa-state');},15000);
+    }
+  }
+
+  document.addEventListener('click',function(e){
+    var el=e.target.closest('[data-cpa-model]');
+    if(!el)return;
+    e.preventDefault();
+    e.stopPropagation();
+    var modelId=el.getAttribute('data-cpa-model');
+    log('click-to-test',modelId);
+    if(!savedKey){toast('Management key not captured yet — click once on the side menu (Keys / Auth Files) to trigger a request, then retry.','#b91c1c');return;}
+    runTest(el,modelId);
+  },true);
+
+  log('init; waiting for mgmt key via first /v0/management/* request');
+})();`
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
 	if timeout <= 0 || onTimeout == nil {
