@@ -5,6 +5,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"errors"
@@ -629,6 +630,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		mgmt.POST("/test-models", s.mgmt.TestModels)
 	}
 }
 
@@ -669,8 +672,160 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.WithError(err).Error("failed to read management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	data = injectTestModelsScript(data)
+	c.Header("Cache-Control", "no-cache")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 }
+
+// injectTestModelsScript decorates the upstream management SPA with a
+// small click-to-test script, inserted just before </body>. The script
+// piggybacks on the SPA's own auth headers to call POST /v0/management/test-models
+// when an operator clicks a model pill in the Available Models section.
+func injectTestModelsScript(html []byte) []byte {
+	const marker = "</body>"
+	idx := bytes.LastIndex(html, []byte(marker))
+	if idx < 0 {
+		return html
+	}
+	script := []byte("<script>\n" + testModelsInjectedScript + "\n</script>\n")
+	out := make([]byte, 0, len(html)+len(script))
+	out = append(out, html[:idx]...)
+	out = append(out, script...)
+	out = append(out, html[idx:]...)
+	return out
+}
+
+// testModelsInjectedScript is the client-side behavior added to the
+// management panel: captures the management bearer token from the SPA's
+// outgoing requests, then attaches a click handler that tests whichever
+// model pill the operator clicks on inside the Available Models section.
+const testModelsInjectedScript = `(function(){
+  'use strict';
+  var savedKey=null, proxyKey=null, modelSet=null;
+  var origFetch=window.fetch.bind(window);
+  var origSetHeader=XMLHttpRequest.prototype.setRequestHeader;
+  var origOpen=XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open=function(m,u){this.__cpa_url=u;return origOpen.apply(this,arguments);};
+  XMLHttpRequest.prototype.setRequestHeader=function(n,v){
+    try{
+      if(n&&n.toLowerCase()==='authorization'&&typeof v==='string'&&v.indexOf('Bearer ')===0){
+        var u=this.__cpa_url||'';
+        if(u.indexOf('/v0/management/')>=0)savedKey=v.slice(7);
+      }
+    }catch(e){}
+    return origSetHeader.apply(this,arguments);
+  };
+  window.fetch=function(input,init){
+    try{
+      var u=typeof input==='string'?input:(input&&input.url)||'';
+      if(u.indexOf('/v0/management/')>=0){
+        var h=(init&&init.headers)||(input&&input.headers),auth=null;
+        if(h){
+          if(typeof h.get==='function')auth=h.get('Authorization')||h.get('authorization');
+          else auth=h.Authorization||h.authorization;
+        }
+        if(auth&&auth.indexOf('Bearer ')===0)savedKey=auth.slice(7);
+      }
+    }catch(e){}
+    return origFetch.apply(this,arguments);
+  };
+  function toast(msg,color){
+    var t=document.createElement('div');
+    t.textContent=msg;
+    t.style.cssText='position:fixed;bottom:20px;right:20px;background:'+color+';color:#fff;'+
+      'padding:10px 14px;border-radius:8px;font:13px/1.4 ui-monospace,monospace;'+
+      'max-width:480px;white-space:pre-wrap;box-shadow:0 4px 12px rgba(0,0,0,0.4);z-index:99999;'+
+      'opacity:0;transition:opacity .2s;';
+    document.body.appendChild(t);
+    requestAnimationFrame(function(){t.style.opacity='1';});
+    setTimeout(function(){t.style.opacity='0';setTimeout(function(){t.remove();},300);},7000);
+  }
+  async function ensureModelSet(){
+    if(modelSet)return modelSet;
+    if(!savedKey)return null;
+    try{
+      if(!proxyKey){
+        var r=await origFetch('/v0/management/api-keys',{headers:{'Authorization':'Bearer '+savedKey}});
+        if(r.ok){
+          var j=await r.json();
+          var arr=Array.isArray(j)?j:(j.data||j.keys||j.items||[]);
+          for(var i=0;i<arr.length&&!proxyKey;i++){
+            var it=arr[i];
+            var v=typeof it==='string'?it:(it&&(it.key||it.api_key||it.apiKey||it.value));
+            if(v&&typeof v==='string'&&v.trim())proxyKey=v.trim();
+          }
+        }
+      }
+      if(!proxyKey)return null;
+      var m=await origFetch('/v1/models',{headers:{'Authorization':'Bearer '+proxyKey}});
+      if(!m.ok)return null;
+      var mj=await m.json();
+      modelSet=new Set(((mj.data||[])).map(function(x){return x.id;}));
+      return modelSet;
+    }catch(e){return null;}
+  }
+  function isUnderAvailableModels(el){
+    var cur=el;
+    for(var i=0;i<15&&cur;i++){
+      if(cur.querySelector){
+        var headings=cur.querySelectorAll('h1,h2,h3,h4,h5,[class*=title],[class*=Title],[class*=heading]');
+        for(var j=0;j<headings.length;j++){
+          var t=headings[j].textContent||'';
+          if(/available models/i.test(t))return true;
+        }
+      }
+      cur=cur.parentElement;
+    }
+    return false;
+  }
+  async function runTest(el,modelId){
+    if(!savedKey){toast('Management key not captured yet — interact with the panel once (reload a section) and retry.','#b91c1c');return;}
+    var origBg=el.style.backgroundColor,origOutline=el.style.outline;
+    el.style.outline='2px solid #facc15';
+    el.style.outlineOffset='2px';
+    try{
+      var r=await origFetch('/v0/management/test-models',{
+        method:'POST',
+        headers:{'Authorization':'Bearer '+savedKey,'Content-Type':'application/json'},
+        body:JSON.stringify({models:[modelId],max_tokens:20,timeout_seconds:25})
+      });
+      var txt=await r.text();
+      if(!r.ok){toast('HTTP '+r.status+' — '+txt.slice(0,300),'#b91c1c');return;}
+      var data=JSON.parse(txt),res=(data.results||[])[0]||{};
+      if(res.success){
+        el.style.outline='2px solid #4ade80';
+        toast('✓ '+modelId+'\n'+res.latency_ms+'ms · '+res.prompt_tokens+'→'+res.completion_tokens+' tok\nreply: '+(res.reply||'(empty)'),'#166534');
+      }else{
+        el.style.outline='2px solid #f87171';
+        toast('✗ '+modelId+'\nHTTP '+(res.status_code||'-')+' · '+res.latency_ms+'ms\n'+(res.error||'(no error body)'),'#b91c1c');
+      }
+    }catch(e){
+      el.style.outline='2px solid #f87171';
+      toast('Error: '+e.message,'#b91c1c');
+    }finally{
+      setTimeout(function(){el.style.outline=origOutline;el.style.outlineOffset='';el.style.backgroundColor=origBg;},15000);
+    }
+  }
+  document.addEventListener('click',async function(e){
+    var el=e.target.closest('button,span,div,a,li,code');
+    if(!el)return;
+    var text=(el.textContent||'').trim();
+    if(!text||text.length>120||/\s{2,}/.test(text))return;
+    if(!isUnderAvailableModels(el))return;
+    var set=await ensureModelSet();
+    if(!set||!set.has(text))return;
+    e.preventDefault();
+    e.stopPropagation();
+    runTest(el,text);
+  },true);
+  console.log('[cpa] model click-to-test ready; click any pill under Available Models');
+})();`
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
 	if timeout <= 0 || onTimeout == nil {
