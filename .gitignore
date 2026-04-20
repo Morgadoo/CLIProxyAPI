@@ -27,6 +27,7 @@ auths/*
 
 # Documentation
 docs/*
+!docs/redpill-setup.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
