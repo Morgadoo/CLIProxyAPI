@@ -769,7 +769,7 @@ const testModelsInjectedScript = `(function(){
         var r=await origFetch('/v0/management/api-keys',{headers:{'Authorization':'Bearer '+savedKey}});
         if(!r.ok){log('api-keys fetch failed',r.status);return null;}
         var j=await r.json();
-        var arr=Array.isArray(j)?j:(j.data||j.keys||j.items||[]);
+        var arr=Array.isArray(j)?j:(j['api-keys']||j.api_keys||j.apiKeys||j.data||j.keys||j.items||[]);
         for(var i=0;i<arr.length&&!proxyKey;i++){
           var it=arr[i];
           var v=typeof it==='string'?it:(it&&(it.key||it.api_key||it.apiKey||it.value));
