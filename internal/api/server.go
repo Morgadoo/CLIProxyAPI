@@ -707,16 +707,29 @@ func injectTestModelsScript(html []byte) []byte {
 // model pill the operator clicks on inside the Available Models section.
 const testModelsInjectedScript = `(function(){
   'use strict';
-  var savedKey=null, proxyKey=null, modelSet=null;
+  var DEBUG=true;
+  function log(){if(DEBUG)console.log.apply(console,['[cpa]'].concat([].slice.call(arguments)));}
+
+  var style=document.createElement('style');
+  style.textContent='[data-cpa-model]{cursor:pointer!important;transition:outline .15s}'+
+    '[data-cpa-model]:hover{outline:2px solid rgba(125,211,252,0.55)!important;outline-offset:2px!important}'+
+    '[data-cpa-model][data-cpa-state="testing"]{outline:2px solid #facc15!important;outline-offset:2px!important}'+
+    '[data-cpa-model][data-cpa-state="ok"]{outline:2px solid #4ade80!important;outline-offset:2px!important}'+
+    '[data-cpa-model][data-cpa-state="fail"]{outline:2px solid #f87171!important;outline-offset:2px!important}';
+  document.documentElement.appendChild(style);
+
+  var savedKey=null, proxyKey=null, modelSet=null, kickoffStarted=false;
   var origFetch=window.fetch.bind(window);
   var origSetHeader=XMLHttpRequest.prototype.setRequestHeader;
   var origOpen=XMLHttpRequest.prototype.open;
+
+  function captureKey(k){if(k&&k!==savedKey){savedKey=k;log('mgmt key captured');kickoff();}}
   XMLHttpRequest.prototype.open=function(m,u){this.__cpa_url=u;return origOpen.apply(this,arguments);};
   XMLHttpRequest.prototype.setRequestHeader=function(n,v){
     try{
       if(n&&n.toLowerCase()==='authorization'&&typeof v==='string'&&v.indexOf('Bearer ')===0){
         var u=this.__cpa_url||'';
-        if(u.indexOf('/v0/management/')>=0)savedKey=v.slice(7);
+        if(u.indexOf('/v0/management/')>=0)captureKey(v.slice(7));
       }
     }catch(e){}
     return origSetHeader.apply(this,arguments);
@@ -730,11 +743,12 @@ const testModelsInjectedScript = `(function(){
           if(typeof h.get==='function')auth=h.get('Authorization')||h.get('authorization');
           else auth=h.Authorization||h.authorization;
         }
-        if(auth&&auth.indexOf('Bearer ')===0)savedKey=auth.slice(7);
+        if(auth&&auth.indexOf('Bearer ')===0)captureKey(auth.slice(7));
       }
     }catch(e){}
     return origFetch.apply(this,arguments);
   };
+
   function toast(msg,color){
     var t=document.createElement('div');
     t.textContent=msg;
@@ -746,49 +760,62 @@ const testModelsInjectedScript = `(function(){
     requestAnimationFrame(function(){t.style.opacity='1';});
     setTimeout(function(){t.style.opacity='0';setTimeout(function(){t.remove();},300);},7000);
   }
+
   async function ensureModelSet(){
     if(modelSet)return modelSet;
-    if(!savedKey)return null;
+    if(!savedKey){log('no mgmt key yet');return null;}
     try{
       if(!proxyKey){
         var r=await origFetch('/v0/management/api-keys',{headers:{'Authorization':'Bearer '+savedKey}});
-        if(r.ok){
-          var j=await r.json();
-          var arr=Array.isArray(j)?j:(j.data||j.keys||j.items||[]);
-          for(var i=0;i<arr.length&&!proxyKey;i++){
-            var it=arr[i];
-            var v=typeof it==='string'?it:(it&&(it.key||it.api_key||it.apiKey||it.value));
-            if(v&&typeof v==='string'&&v.trim())proxyKey=v.trim();
-          }
+        if(!r.ok){log('api-keys fetch failed',r.status);return null;}
+        var j=await r.json();
+        var arr=Array.isArray(j)?j:(j.data||j.keys||j.items||[]);
+        for(var i=0;i<arr.length&&!proxyKey;i++){
+          var it=arr[i];
+          var v=typeof it==='string'?it:(it&&(it.key||it.api_key||it.apiKey||it.value));
+          if(v&&typeof v==='string'&&v.trim())proxyKey=v.trim();
         }
       }
-      if(!proxyKey)return null;
+      if(!proxyKey){log('no proxy api-key found');return null;}
       var m=await origFetch('/v1/models',{headers:{'Authorization':'Bearer '+proxyKey}});
-      if(!m.ok)return null;
+      if(!m.ok){log('/v1/models fetch failed',m.status);return null;}
       var mj=await m.json();
       modelSet=new Set(((mj.data||[])).map(function(x){return x.id;}));
+      log('model set loaded:',modelSet.size);
       return modelSet;
-    }catch(e){return null;}
+    }catch(e){log('ensureModelSet error',e);return null;}
   }
-  function isUnderAvailableModels(el){
-    var cur=el;
-    for(var i=0;i<15&&cur;i++){
-      if(cur.querySelector){
-        var headings=cur.querySelectorAll('h1,h2,h3,h4,h5,[class*=title],[class*=Title],[class*=heading]');
-        for(var j=0;j<headings.length;j++){
-          var t=headings[j].textContent||'';
-          if(/available models/i.test(t))return true;
-        }
-      }
-      cur=cur.parentElement;
+
+  function markPills(){
+    if(!modelSet)return 0;
+    var all=document.querySelectorAll('span,div,button,a,code,li,p');
+    var marked=0;
+    for(var i=0;i<all.length;i++){
+      var el=all[i];
+      if(el.hasAttribute('data-cpa-model'))continue;
+      if(el.children.length>2)continue;
+      var txt=(el.textContent||'').trim();
+      if(!txt||txt.length>120)continue;
+      if(!modelSet.has(txt))continue;
+      el.setAttribute('data-cpa-model',txt);
+      el.setAttribute('title','Click to test — '+txt);
+      marked++;
     }
-    return false;
+    return marked;
   }
+
+  async function kickoff(){
+    if(kickoffStarted)return;
+    kickoffStarted=true;
+    var set=await ensureModelSet();
+    if(!set){kickoffStarted=false;return;}
+    log('initial pills marked:',markPills());
+    var obs=new MutationObserver(function(){markPills();});
+    obs.observe(document.body,{childList:true,subtree:true});
+  }
+
   async function runTest(el,modelId){
-    if(!savedKey){toast('Management key not captured yet — interact with the panel once (reload a section) and retry.','#b91c1c');return;}
-    var origBg=el.style.backgroundColor,origOutline=el.style.outline;
-    el.style.outline='2px solid #facc15';
-    el.style.outlineOffset='2px';
+    el.setAttribute('data-cpa-state','testing');
     try{
       var r=await origFetch('/v0/management/test-models',{
         method:'POST',
@@ -796,35 +823,35 @@ const testModelsInjectedScript = `(function(){
         body:JSON.stringify({models:[modelId],max_tokens:20,timeout_seconds:25})
       });
       var txt=await r.text();
-      if(!r.ok){toast('HTTP '+r.status+' — '+txt.slice(0,300),'#b91c1c');return;}
+      if(!r.ok){el.setAttribute('data-cpa-state','fail');toast('HTTP '+r.status+' — '+txt.slice(0,300),'#b91c1c');return;}
       var data=JSON.parse(txt),res=(data.results||[])[0]||{};
       if(res.success){
-        el.style.outline='2px solid #4ade80';
+        el.setAttribute('data-cpa-state','ok');
         toast('✓ '+modelId+'\n'+res.latency_ms+'ms · '+res.prompt_tokens+'→'+res.completion_tokens+' tok\nreply: '+(res.reply||'(empty)'),'#166534');
       }else{
-        el.style.outline='2px solid #f87171';
+        el.setAttribute('data-cpa-state','fail');
         toast('✗ '+modelId+'\nHTTP '+(res.status_code||'-')+' · '+res.latency_ms+'ms\n'+(res.error||'(no error body)'),'#b91c1c');
       }
     }catch(e){
-      el.style.outline='2px solid #f87171';
+      el.setAttribute('data-cpa-state','fail');
       toast('Error: '+e.message,'#b91c1c');
     }finally{
-      setTimeout(function(){el.style.outline=origOutline;el.style.outlineOffset='';el.style.backgroundColor=origBg;},15000);
+      setTimeout(function(){el.removeAttribute('data-cpa-state');},15000);
     }
   }
-  document.addEventListener('click',async function(e){
-    var el=e.target.closest('button,span,div,a,li,code');
+
+  document.addEventListener('click',function(e){
+    var el=e.target.closest('[data-cpa-model]');
     if(!el)return;
-    var text=(el.textContent||'').trim();
-    if(!text||text.length>120||/\s{2,}/.test(text))return;
-    if(!isUnderAvailableModels(el))return;
-    var set=await ensureModelSet();
-    if(!set||!set.has(text))return;
     e.preventDefault();
     e.stopPropagation();
-    runTest(el,text);
+    var modelId=el.getAttribute('data-cpa-model');
+    log('click-to-test',modelId);
+    if(!savedKey){toast('Management key not captured yet — click once on the side menu (Keys / Auth Files) to trigger a request, then retry.','#b91c1c');return;}
+    runTest(el,modelId);
   },true);
-  console.log('[cpa] model click-to-test ready; click any pill under Available Models');
+
+  log('init; waiting for mgmt key via first /v0/management/* request');
 })();`
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
