@@ -797,6 +797,7 @@ const testModelsInjectedScript = `(function(){
       var txt=(el.textContent||'').trim();
       if(!txt||txt.length>120)continue;
       if(!modelSet.has(txt))continue;
+      if(el.parentElement&&el.parentElement.closest&&el.parentElement.closest('[data-cpa-model]'))continue;
       el.setAttribute('data-cpa-model',txt);
       el.setAttribute('title','Click to test — '+txt);
       marked++;
